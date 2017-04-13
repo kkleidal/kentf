@@ -162,3 +162,81 @@ def timeseries_to_spec(frames, window_type='hamming', zero_pad=True, remove_dc=T
             return np.fft.rfft(x).astype(np.complex64)
         spec, = tf.py_func(rfft, [frames], [tf.complex64])
     return tf.slice(spec, [0, 0, 0, 0], [-1, -1, -1, N_fft / 2 + 1])
+
+def mel_filterbank(N_fft, sample_rate, num_bands=23, low_freq=0, high_freq=8000):
+    '''
+    Computes a [N_fft, num_bands] tensor representing the mel filterbank
+    Params:
+        - N_fft: number of FFT bins
+        - sample_rate: the sample rate of the signal
+        - num_bands: how many filter bands to use (defaults to 23)
+        - low_freq: the lowest frequency in the bands (defaults to 0 Hz, 300 Hz is another good option)
+        - high_freq: the highest frequency in the bands (defaults to 8000 Hz)
+    '''
+    fbank, = tf.py_func(_py_mel_filterbank, [N_fft, sample_rate, num_bands, low_freq, high_freq], [tf.float32])
+    fbank.set_shape([None, num_bands])
+    return fbank
+
+def apply_filterbank(spec, filter_bank):
+    '''
+    Params:
+      - spec: [batch_size, channels, frames, FFT bins] tensor, the magnitude spectrum
+      - filter_bank: [FFT bins, number filters] tensor, the filter bank 
+    Returns:
+      - [batch_size, channels, frames, number filters] tensor, the filter bank features
+
+    Example:
+
+    import scipy.io.wavfile as wavfile
+
+    def spec_generator(audio, sample_rate):
+        frame_length = int(0.025 * sample_rate)
+        frame_shift = int(0.015 * sample_rate)
+        frames = sliding_window(audio, frame_length, frame_shift, padding="VALID")
+        spec = timeseries_to_spec(frames)
+        spec = decibels(spec)
+        fbank = mel_filterbank(tf.shape(spec)[-1], sample_rate)
+        fbank_features = apply_filterbank(spec, fbank)
+        return fbank_features
+
+    with tf.Session() as sess:
+        sr, audio = wavfile.read("/data/sls/u/urop/kkleidal/three.wav")
+        p = tf.placeholder(tf.float32, [None, 2, None])
+        fbank = spec_generator(p, sr)
+        audio_float = audio.astype(np.float32) / np.iinfo(np.int16).max
+        audio_float = np.expand_dims(audio_float.T, 0)
+        fbank = sess.run([fbank], feed_dict={
+            p: audio_float,
+        })
+        f = draw_spectrogram(np.squeeze(fbank, axis=0))
+        plt.show(f)
+    '''
+    shape = tf.shape(spec)
+    two_d = tf.reshape(spec, [-1, shape[-1]])
+    feats = tf.matmul(two_d, filter_bank)
+    return tf.reshape(feats, [shape[0], shape[1], shape[2], -1])
+
+###########################
+## PRIVATE UTILITY FUNCS ##
+###########################
+
+def _freq_to_mel(freq):
+    return 2595.0 * np.log10(1.0 + freq / 700.0)
+
+def _mel_to_freq(mel):
+    return 700.0 * (np.power(10, mel / 2595.0) - 1.0)
+
+def _py_mel_filterbank(N_fft, sample_rate, num_bands=23, low_freq=0, high_freq=8000):
+    high_freq = min(high_freq, sample_rate)
+    mel_bounds = _freq_to_mel(np.array([high_freq, low_freq]))
+    mel_points = np.flip(np.linspace(mel_bounds[0], mel_bounds[1], num_bands + 2), 0)
+    freq_points = _mel_to_freq(mel_points)
+    bin_points = np.floor(float(N_fft + 1) * freq_points / float(sample_rate)).astype(np.int32)
+    fbank = np.zeros((N_fft, num_bands))
+    for band in range(num_bands):
+        start = bin_points[band]
+        mid = bin_points[band + 1]
+        end = bin_points[band + 2]
+        fbank[start:mid+1, band] = np.linspace(0.0, 1.0, mid - start + 1)
+        fbank[mid:end+1, band] = np.linspace(1.0, 0.0, end - mid + 1)
+    return fbank.astype(np.float32)

@@ -1,7 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
-def draw_spectrogram(spec, sample_rate):
+def draw_spectrogram(spec, sample_rate=None):
     '''
     Expects spectrogram as [channels, frame count, FFT bins]
     '''
@@ -10,10 +10,11 @@ def draw_spectrogram(spec, sample_rate):
     for chan in range(channels):
         s = spec[chan, :, :].T
         ax[chan].imshow(s, interpolation='nearest', aspect='auto', origin='lower')
-        ticks = np.arange(0, s.shape[0], s.shape[0] // 8)
-        ax[chan].set_yticks(ticks)
-        ax[chan].set_yticklabels((sample_rate / (2.0 * s.shape[0]) * ticks).astype(np.int32))
-        ax[chan].set_ylabel("Hz")
+        if sample_rate is not None:
+            ticks = np.arange(0, s.shape[0], s.shape[0] // 8)
+            ax[chan].set_yticks(ticks)
+            ax[chan].set_yticklabels((sample_rate / (2.0 * s.shape[0]) * ticks).astype(np.int32))
+            ax[chan].set_ylabel("Hz")
         ax[chan].set_xlabel("Frame")
         ax[chan].set_title("Channel %d" % (chan + 1))
     return f
