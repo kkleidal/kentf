@@ -154,13 +154,13 @@ def timeseries_to_spec(frames, window_type='hamming', zero_pad=True, remove_dc=T
         frames = tf.pad(frames, [[0, 0], [0, 0], [0, 0], [0, N_fft - N]], "CONSTANT")
     window = get_window(window_type, N, N_t=N_fft) 
     frames = frames * window
-    if gpu:
-        complex_frames = tf.complex(frames, tf.zeros(tf.shape(frames)))
-        spec = tf.fft(complex_frames)
-    else:
-        def rfft(x):
-            return np.fft.rfft(x).astype(np.complex64)
-        spec, = tf.py_func(rfft, [frames], [tf.complex64])
+    # if gpu:
+    complex_frames = tf.complex(frames, tf.zeros(tf.shape(frames)))
+    spec = tf.fft(complex_frames)
+    # else:
+    #     def rfft(x):
+    #         return np.fft.rfft(x).astype(np.complex64)
+    #     spec, = tf.py_func(rfft, [frames], [tf.complex65])
     return tf.slice(spec, [0, 0, 0, 0], [-1, -1, -1, N_fft / 2 + 1])
 
 def mel_filterbank(N_fft, sample_rate, num_bands=23, low_freq=0, high_freq=8000):
@@ -173,7 +173,7 @@ def mel_filterbank(N_fft, sample_rate, num_bands=23, low_freq=0, high_freq=8000)
         - low_freq: the lowest frequency in the bands (defaults to 0 Hz, 300 Hz is another good option)
         - high_freq: the highest frequency in the bands (defaults to 8000 Hz)
     '''
-    fbank, = tf.py_func(_py_mel_filterbank, [N_fft, sample_rate, num_bands, low_freq, high_freq], [tf.float32])
+    fbank = tf.constant(_py_mel_filterbank(N_fft, sample_rate, num_bands, low_freq, high_freq))
     fbank.set_shape([None, num_bands])
     return fbank
 
