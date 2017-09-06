@@ -100,6 +100,10 @@ def timeseries_to_spec(frames, frame_length, window_type='hamming', N_fft=None, 
                 # Downsample the frames to N_fft
                 assert(DEPTH_AXIS == 2)
                 frames = tf.image.resize_images(frames, [tf.shape(frames)[1], N_fft])
+        ## New FFT
+        #frames = tf.cast(tf.transpose(frames, [0, 1, 3, 2]), tf.float32) # BLDC -> BLCD
+        #mag_spec = tf.spectral.rfft(frames, fft_length=[N_fft] if N_fft is not None else None)
+        #mag_spec = tf.cast(tf.transpose(mag_spec, [0, 1, 3, 2]), tf.float64) # BLCD -> BLDC
         # FFT
         complex_frames = tf.complex(tf.cast(frames, tf.float32), tf.zeros(tf.shape(frames)))
         complex_frames = tf.transpose(complex_frames, [0, 1, 3, 2]) # BLDC -> BLCD
@@ -109,9 +113,10 @@ def timeseries_to_spec(frames, frame_length, window_type='hamming', N_fft=None, 
         complex_spec = tf.transpose(complex_spec, [0, 1, 3, 2]) # BLCD -> BLDC
         complex_spec = tf.cast(complex_spec, tf.complex128)
         mag_spec = magnitude(complex_spec, name="magnitude_spec")
-        energy_spec = energy(complex_spec, name="energy_spec")
+
+        energy_spec = tf.square(mag_spec, name="energy_spec")
         log_mag_spec = decibels(mag_spec, name="log_magnetude_spec")
-        log_energy_spec = decibels(energy_spec, name="log_energy_spec")
+        log_energy_spec = 2 * log_mag_spec
         return N_fft, mag_spec, energy_spec, log_mag_spec, log_energy_spec
 
 def apply_filterbank(spec, filter_bank, name=None):
@@ -227,6 +232,57 @@ def moving_average(a, n=3) :
     ret[n:] = ret[n:] - ret[:-n]
     return ret[n - 1:] / n
             
+def remove_dc(signal, signal_lengths, signal_mask, last_sof=None, last_sin=None, online=True, name=None):
+    name = scoping.adapt_name(name, "remove_dc")
+    with tf.variable_scope(name):
+        if online:
+            batch_size = tf.shape(signal)[0]
+            length = tf.shape(signal)[1]
+            channels = tf.shape(signal)[-1]
+            zeros = tf.zeros([batch_size, 1, channels], dtype=tf.float64)
+            if last_sof is None:
+                last_sof = zeros 
+            if last_sin is None:
+                last_sin = zeros
+            sof = last_sof
+            i = tf.constant(0)
+            def body(i, sof, last_sin):
+                last_sof = tf.slice(sof, [0, i, 0], [-1, 1, -1])
+                cur_sin = tf.slice(signal, [0, i, 0], [-1, 1, -1])
+                cur_mask = tf.slice(signal_mask, [0, i, 0], [-1, 1, -1])
+                cur_sof = tf.where(
+                    cur_mask,
+                    cur_sin - last_sin + 0.999 * last_sof,
+                    zeros)
+                new_sof = tf.concat([sof, cur_sof], axis=1)
+                newi = tf.add(i, 1)
+                return newi, new_sof, cur_sin
+            _, sof, _ = tf.while_loop(
+                lambda i, sof, last_sin: tf.less(i, length),
+                body,
+                loop_vars=[i, sof, last_sin],
+                shape_invariants=[
+                    i.get_shape(),
+                    tf.TensorShape([None, None, None]),
+                    last_sin.get_shape()],
+                back_prop=False)
+            sof = tf.slice(sof, [0, 1, 0], [-1, -1, -1])
+            sof = tf.reshape(sof, tf.shape(signal))
+            demeaned = tf.identity(sof, "demeaned")
+            mean = tf.identity(signal - demeaned, "mean")
+            last_sin = tf.slice(last_sin, [0, tf.shape(signal)[1] - 1, 0], [-1, 1, -1])
+            last_sof = tf.slice(demeaned, [0, tf.shape(demeaned)[1] - 1, 0], [-1, 1, -1])
+            return mean, demeaned, last_sof, last_sin
+        else:
+            # If index < signal_lengths, count in the mean and remove mean
+            zeros = tf.zeros(tf.shape(signal), dtype=tf.float64)
+            mean = tf.reduce_sum(tf.where(signal_mask, signal, zeros), axis=LENGTH_AXIS, keep_dims=True) / tf.cast(tf.expand_dims(signal_lengths, 1), tf.float64)
+            mean = tf.identity(mean, "mean")
+            demeaned = tf.where(signal_mask, signal - mean, zeros)
+            return mean, demeaned, None, None
+
+
+
 class AudioPreprocessing:
     '''
     For extracting features from an audio signal
@@ -235,6 +291,7 @@ class AudioPreprocessing:
     
     def __init__(self, raw_waveforms, raw_waveform_lengths,
             sample_rate, frame_length_ms, frame_shift_ms,
+            last_sof=None, last_sin=None, online=True,
             channels=1, filterbank_size=23, mfcc_size=13, preemphasis=0.97, max_length=None, N_fft=512,
             name=None):
         '''
@@ -272,9 +329,17 @@ class AudioPreprocessing:
                 self.frame_length_py, self.frame_length = convert_ms_to_samples(frame_length_ms, name="frame_length")
                 self.frame_shift_py, self.frame_shift = convert_ms_to_samples(frame_shift_ms, name="frame_shift")
                 preemphasis, preemphasis_py = variableify(preemphasis, name="preemphasis")
-            with tf.name_scope("remove_offset"):
-                self.dc_offset = tf.reduce_mean(self.raw_waveforms, axis=LENGTH_AXIS, name="dc_offset")
-                self.s_of = tf.identity(self.raw_waveforms - self.dc_offset, name="s_of")
+            with tf.name_scope("mask"):
+                idxes = tf.tile(
+                    tf.expand_dims(tf.range(0, tf.shape(self.raw_waveforms)[LENGTH_AXIS], 1, dtype=tf.int32), 0),
+                    [tf.shape(self.raw_waveforms)[BATCH_AXIS], 1])
+                self.mask = idxes < tf.expand_dims(self.raw_waveform_lengths, 1)
+
+                self.mask = tf.tile(tf.expand_dims(self.mask, -1),
+                        [1, 1, tf.shape(self.raw_waveforms)[-1]])
+            self.dc_offset, self.s_of, self.last_sof, self.last_sin = remove_dc(self.raw_waveforms,
+                    self.raw_waveform_lengths, self.mask,
+                    last_sof=last_sof, last_sin=last_sin, online=online, name="remove_dc")
             with tf.name_scope("preemphasis"):
                 '''
                 kernel = [
@@ -418,7 +483,7 @@ def example():
     with g.as_default():
         raw_waveforms = tf.placeholder(tf.float64, [None, None, 2], name="raw_waveforms")
         raw_waveform_lengths = tf.placeholder(tf.int32, [None], name="raw_waveform_lengths")
-        audio = AudioPreprocessing(raw_waveforms, raw_waveform_lengths, 16000, 25.0, 10.0, channels=2)
+        audio = AudioPreprocessing(raw_waveforms, raw_waveform_lengths, 16000, 25.0, 10.0, channels=2, online=False)
 
         with tf.Session() as sess:
             sess.run(tf.global_variables_initializer())
@@ -536,4 +601,58 @@ def example():
             plt.plot(ref_mfccs[0,:,mfcc:mfcc+1,0])
             plt.show()
             plt.plot(X[:-1], err[:,mfcc:mfcc+1])
+            plt.show()
+
+def example_librosa():
+    import matplotlib.pyplot as plt
+    import specplotting
+    import librosa
+
+    audio_path = "./scratch/lab1-resources/gas_station.wav"
+    sample_rate, s_in = read_wav_audio(audio_path)
+    lr_y, lr_sr = librosa.load(audio_path, 16000)
+    print("Librosa sr: ", lr_sr)
+    samples = len(s_in)
+    print("The file is %d samples long" % samples);
+    print('The sample rate is %d Hz' % sample_rate);
+
+    ms_per_sec = 1000.0;
+    milliseconds = samples / sample_rate * ms_per_sec;
+    print('The file is %d milliseconds long' % milliseconds);
+
+    inp = np.reshape(s_in, [1, s_in.shape[0], 1])
+    inplens = np.array([s_in.shape[0]])
+
+    g = tf.Graph()
+    with g.as_default():
+        raw_waveforms = tf.placeholder(tf.float64, [None, None, 1], name="raw_waveforms")
+        raw_waveform_lengths = tf.placeholder(tf.int32, [None], name="raw_waveform_lengths")
+        N_fft=512
+        audio = AudioPreprocessing(raw_waveforms, raw_waveform_lengths, 16000, 25.0, 10.0, N_fft=N_fft, channels=1)
+
+        print(audio.frame_length_py)
+        print(audio.N_fft_py)
+        print(audio.frame_shift_py)
+
+        S = librosa.core.stft(lr_y, n_fft=N_fft, hop_length=audio.frame_shift_py, win_length=audio.frame_length_py,
+                window="hamming", center=True, pad_mode="constant")
+        print(S.shape)
+        # S = librosa.feature.melspectrogram(S=S, sr=lr_sr, n_mels=23)
+        ref_fbank = librosa.logamplitude(S, amin=10**(-50)).T
+
+        with tf.Session() as sess:
+            sess.run(tf.global_variables_initializer())
+            feed_dict = {
+                g.get_tensor_by_name("raw_waveforms:0"): inp,
+                g.get_tensor_by_name("raw_waveform_lengths:0"): inplens,
+            }
+            out = sess.run({
+                "filterbank": audio.s_pe.log_magnitude_spectrogram, # audio.s_pe.log_mel_fbank_features,
+            }, feed_dict=feed_dict)
+            print(out["filterbank"][0,:,:,0].shape)
+            specplotting.plot_spec(out["filterbank"][0,:,:,0], sample_rate=sample_rate, title="Mel Filterbank Energies (dB)")
+            plt.ylabel("Feature")
+            plt.show()
+            specplotting.plot_spec(ref_fbank, sample_rate=sample_rate, title="Librosa Ref Mel Filterbank Energies (dB)")
+            plt.ylabel("Feature")
             plt.show()
