@@ -66,6 +66,10 @@ def decibels(signal, name=None):
     with tf.name_scope(name):
         return 10 * tf.maximum(tf.log(signal) / np.log(10), -50, name=name)
 
+def get_Nfft(frame_length):
+    # Get the next power of 2 above frame_length
+    return int(np.power(2, np.ceil(np.log(np.float64(frame_length)) / np.log(2))))
+
 def timeseries_to_spec(frames, frame_length, window_type='hamming', N_fft=None, zero_pad=True, name=None):
     '''
     Converts a timeseries to a spectrogram (preprocessing by removing the DC offset, zero padding,
@@ -90,8 +94,7 @@ def timeseries_to_spec(frames, frame_length, window_type='hamming', N_fft=None, 
         # Padding/clipping to N_fft
         if zero_pad:
             if N_fft is None:
-                # Get the next power of 2 above frame_length
-                N_fft = np.power(2, np.ceil(np.log(np.float64(frame_length)) / np.log(2)))
+                N_fft = get_Nfft(frame_length)
             if N_fft > frame_length:
                 # Pad the frames to N_fft
                 padding = [[0, 0] if i != DEPTH_AXIS else [0, N_fft - frame_length] for i in range(4)]
@@ -313,6 +316,13 @@ class AudioPreprocessing:
         name = scoping.adapt_name(name, "audio_preprocessing")
         with tf.name_scope(name):
             with tf.name_scope("params"):
+                def convert_ms_to_samples(ms, name="ms_to_samples"):
+                    x = np.int32(float(ms) / float(ms_per_sec) * float(sample_rate))
+                    return constantify(x, name)
+                self.frame_length_py, self.frame_length = convert_ms_to_samples(frame_length_ms, name="frame_length")
+                self.frame_shift_py, self.frame_shift = convert_ms_to_samples(frame_shift_ms, name="frame_shift")
+                if N_fft is None:
+                    N_fft = get_Nfft(self.frame_length_py)
                 self.N_fft_py, self.N_fft = constantify(N_fft, "N_fft")
                 self.raw_waveforms = raw_waveforms
                 self.raw_waveform_lengths = raw_waveform_lengths
@@ -323,11 +333,6 @@ class AudioPreprocessing:
                 self.preemphasis_py, self.preemphasis = constantify(np.float64(preemphasis), "preemphasis")
                 self.filterbank_size_py, self.filterbank_size = constantify(filterbank_size, "filterbank_size")
                 self.mfcc_size_py, self.mfcc_size = constantify(mfcc_size, "mfcc_size")
-                def convert_ms_to_samples(ms, name="ms_to_samples"):
-                    x = np.int32(float(ms) / float(ms_per_sec) * float(sample_rate))
-                    return constantify(x, name)
-                self.frame_length_py, self.frame_length = convert_ms_to_samples(frame_length_ms, name="frame_length")
-                self.frame_shift_py, self.frame_shift = convert_ms_to_samples(frame_shift_ms, name="frame_shift")
                 preemphasis, preemphasis_py = variableify(preemphasis, name="preemphasis")
             with tf.name_scope("mask"):
                 idxes = tf.tile(
