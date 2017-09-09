@@ -9,8 +9,10 @@ def call_tracker(name, cache={}):
         cache[fullname] = 0
         return name
 
-def adapt_name(name, default, cache={}):
+def adapt_name(name, default, cache={}, numbering=True):
     if name is not None:
         return name
+    elif numbering:
+        return default
     else:
         return call_tracker(default, cache=cache)
