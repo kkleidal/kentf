@@ -1,0 +1,137 @@
+#!/usr/bin/env python3
+
+import sys
+import os
+import datetime
+import subprocess
+import shutil
+import fileinput
+from threading import Thread
+
+from config import ConfigHelper, ConfigKWArg
+
+def get_dir(config):
+    with subprocess.Popen(["hostname"], stdout=subprocess.PIPE) as p:
+        hostname = p.stdout.read().decode('utf8').strip()
+
+    visible = os.getenv("CUDA_VISIBLE_DEVICES", "")
+    if len(visible) > 0:
+        visible = "GPUs" + visible
+    else:
+        visible = "CPU"
+
+    now = datetime.datetime.now().strftime("%y%m%d%H%M%S")
+    name_vals = (now, config.name, hostname, visible)
+    name = "%s.exp" % "-".join(name_vals)
+    dirname = os.path.join(config.exp_dir, name)
+    os.makedirs(dirname, exist_ok=True)
+    return dirname
+
+def make_config_helper():
+    helper = ConfigHelper('''
+        Runs an experiment and saves the output and import contextual files to an experiments directory.
+        Default configuration args can be specified in a YAML or JSON configuration file as well and
+          then overriden with command line args.
+        The command is run with OUTPUT_DIR env variable set to the output directory for the experiment, if
+          files are to written by the experiment to an experiment-specific context.
+        ''')
+    helper.add_argument(ConfigKWArg("context", "./src/train-model.py", type='filesr', required=False,
+        short_name="c", nargs='+',
+        help='Context files (or directories) to save with the results. They are saved before running the experiment. This is usually the code for the experiment.'))
+    helper.add_argument(ConfigKWArg("output", "./tf-logdir", type='filesr', required=False,
+        short_name="o", nargs='+',
+        help='Output files (or directories) from the experiment. They are saved after running the experiment. NOTE that OUTPUT_DIR is also passed to the experiment where output files can be saved directly without using the -o flag.'))
+    helper.add_argument(ConfigKWArg("name", "preliminary-experiment-lambda-1e-1", type=str, required=False,
+        short_name="n", default='untitled',
+        help='The name of the experiment'))
+    helper.add_argument(ConfigKWArg("desc", "The first lambda setting tried.", type=str, required=False,
+        short_name="d", default='',
+        help='The description of the experiment'))
+    helper.add_argument(ConfigKWArg("exp_dir", "~/scratch/gan-experiments",
+        type='filer', required=False,
+        default="/tmp/%s-experiments" % os.getenv("USER"),
+        help='The base experiments directory in which to save all experiments'))
+    helper.add_argument(ConfigKWArg("command", "python3 train-model.py",
+        type=str, required=True,
+        help='The command to run'))
+    return helper
+
+def tee(stream_in, stream_outs):
+    try:
+        while True:
+            for data in stream_in:
+                #data = stream_in.read(1)
+                for stream_out in stream_outs:
+                    stream_out.write(data)
+                    stream_out.flush()
+    except ValueError:
+        pass
+    finally:
+        pass
+
+def copy(x, y):
+    if os.path.exists(x):
+        os.makedirs(os.path.dirname(y), exist_ok=True)
+        if os.path.isdir(x):
+            shutil.copytree(x, y, symlinks=True)
+        else:
+            shutil.copy(x, y)
+
+def main():
+    config_helper = make_config_helper()
+    try:
+        config = config_helper.parse_args()
+    except RuntimeError as details:
+        print("run-experiment: %s" % details, file=sys.stderr)
+        print("run-experiment: Consult --help", file=sys.stderr)
+        sys.exit(1)
+    dirname = get_dir(config)
+    with open(os.path.join(dirname, "meta.yaml"), "w") as f:
+        config_helper.make_yaml_stub(f, config)
+    context_dir = os.path.join(dirname, "context")
+    os.makedirs(context_dir, exist_ok=True)
+    output_dir = os.path.join(dirname, "output")
+    os.makedirs(output_dir, exist_ok=True)
+
+    for filename in config.context:
+        source = os.path.abspath(filename)
+        dest = os.path.join(context_dir, os.path.basename(source))
+        copy(source, dest)
+
+    return_code = -1
+    try:
+        tflogdir = os.path.join(output_dir, "logdir")
+        os.makedirs(tflogdir, exist_ok=True)
+        env = dict(os.environ)
+        env.update({
+          "OUTPUT_DIR": output_dir,
+          "TF_LOGDIR": tflogdir,
+        })
+        print("Running %s" % config.command)
+        with subprocess.Popen(["%s && sleep 5" % config.command], stdin=sys.stdin,
+                stdout=sys.stdout.buffer, stderr=sys.stderr.buffer, # subprocess.PIPE, stderr=subprocess.PIPE,
+                env=env, shell="/bin/bash") as p:
+            with open(os.path.join(dirname, "stdout.log"), "wb") as stdout, \
+                    open(os.path.join(dirname, "stderr.log"), "wb") as stderr:
+                # thread1 = Thread(target=tee, args=(p.stdout, [sys.stdout.buffer, stdout]))
+                # thread2 = Thread(target=tee, args=(p.stderr, [sys.stderr.buffer, stderr]))
+                # thread1.start()
+                # thread2.start()
+                return_code = p.wait()
+                # p.stdout.close()
+                # p.stderr.close()
+                # thread1.join()
+                # thread2.join()
+    except KeyboardInterrupt:
+        print("run-experiment: Keyboard interrupt.", file=sys.stderr)
+    finally:
+        with open(os.path.join(dirname, "return-code.txt"), "w") as f:
+            f.write("%d" % return_code)
+
+        for filename in config.output:
+            source = os.path.abspath(filename)
+            dest = os.path.join(output_dir, os.path.basename(source))
+            copy(source, dest)
+
+if __name__ == "__main__":
+    main()
