@@ -2,20 +2,12 @@ import tensorflow as tf
 import tflearn as tfl
 from kentf.scoping import adapt_name
 
-def merge_grads(grad_list, name=None):
+def merge_grads(tower_grads, name=None):
     name = adapt_name(name, "merge-grads")
     with tf.name_scope(name):
-        for i in range(len(grad_list)):
-            grad_list[i].sort(key=lambda x: x[1].name)
-        out = []
-        for i, (tensor, vari) in enumerate(grad_list[0]):
-            names = [grad_list[j][i][1].name for j in range(len(grad_list))]
-            assert all((name == vari.name for name in names)), names
-            grad_avg = tf.reduce_mean(
-                tf.stack([grad_list[j][i][0] for j in range(len(grad_list))], axis=0),
-                axis=0)
-            out.append((grad_avg, vari))
-        return out
+        return [(tf.reduce_mean(tf.stack([val for val, var in grad_group], 0), 0),
+            grad_group[0][1])
+            for grad_group in zip(*tower_grads)]
 
 def split_and_recombined(inps, fn, num_splits, name=None):
     name = adapt_name(name, "split-and-recombine")
