@@ -1,5 +1,4 @@
 import tensorflow as tf
-import tflearn as tfl
 from kentf.scoping import adapt_name
 
 def merge_grads(tower_grads, name=None):
