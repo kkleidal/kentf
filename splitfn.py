@@ -4,9 +4,15 @@ from kentf.scoping import adapt_name
 def merge_grads(tower_grads, name=None):
     name = adapt_name(name, "merge-grads")
     with tf.name_scope(name):
-        return [(tf.reduce_mean(tf.stack([val for val, var in grad_group], 0), 0),
-            grad_group[0][1])
-            for grad_group in zip(*tower_grads)]
+        grads = []
+        for grad_group in zip(*tower_grads):
+            var = grad_group[0][1]
+            vals = [val for val, var in grad_group if val is not None]
+            if len(vals) == 0:
+                grads.append((None, var))
+            else:
+                grads.append((tf.reduce_mean(tf.stack(vals, 0), 0), var))
+        return grads
 
 def split_and_recombined(inps, fn, num_splits, name=None):
     name = adapt_name(name, "split-and-recombine")
